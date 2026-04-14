@@ -7,9 +7,46 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/registerfields.h"
 #include "riscv_smmpt.h"
 #include "pmp.h"
 #include "system/memory.h"
+
+/* Non-leaf/Leaf MPTE common fields. */
+FIELD(MPTE, V, 0, 1)
+FIELD(MPTE, L, 1, 1)
+
+/* Non-leaf MPTE common fields. */
+FIELD(MPTE_NON_LEAF, RSV, 2, 8)
+
+/* Smmpt32 non-leaf MPTE fields. */
+FIELD(MPTE_NON_LEAF_32, PPN, 10, 22)
+
+/* Smmpt[43|52|64] non-leaf MPTE fields. */
+FIELD(MPTE_NON_LEAF_64, PPN, 10, 44)
+FIELD(MPTE_NON_LEAF_64, RSV, 54, 10)
+
+/* Leaf MPTE common fields. */
+FIELD(MPTE_LEAF, N, 2, 1)
+FIELD(MPTE_LEAF, RSV, 3, 5)
+
+/* Smmpt34 non-NAPOT leaf MPTE fields. */
+FIELD(MPTE_LEAF_32, PERMS, 8, 24)
+
+/* Smmpt[43|52|64] non-NAPOT leaf MPTE fields. */
+FIELD(MPTE_LEAF_64, PERMS, 8, 48)
+FIELD(MPTE_LEAF_64, RSV, 56, 8)
+
+/* NAPOT leaf MPTE common fields. */
+FIELD(MPTE_NAPOT_LEAF, PERMS, 8, 3)
+FIELD(MPTE_NAPOT_LEAF, RSV, 11, 1)
+FIELD(MPTE_NAPOT_LEAF, G, 12, 4)
+
+/* Smmpt34 NAPOT leaf fields. */
+FIELD(MPTE_NAPOT_LEAF_32, RSV, 16, 16)
+
+/* Smmpt[43|52|64] NAPOT leaf fields. */
+FIELD(MPTE_NAPOT_LEAF_64, RSV, 16, 48)
 
 typedef uint64_t load_entry_fn(AddressSpace *, hwaddr,
                                MemTxAttrs, MemTxResult *);
@@ -26,92 +63,81 @@ static uint64_t load_entry_64(AddressSpace *as, hwaddr addr,
     return address_space_ldq(as, addr, attrs, result);
 }
 
-typedef union {
-    uint64_t raw;
-    struct {
-        uint32_t v:1;
-        uint32_t l:1;
-        uint32_t rsv1:5;
-        uint32_t perms:24;
-        uint32_t n:1;
-    } leaf32;
-    struct {
-        uint32_t v:1;
-        uint32_t l:1;
-        uint32_t rsv1:8;
-        uint32_t ppn:22;
-    } nonleaf32;
-    struct {
-        uint64_t v:1;
-        uint64_t l:1;
-        uint64_t rsv1:8;
-        uint64_t perms:48;
-        uint64_t rsv2:5;
-        uint64_t n:1;
-    } leaf64;
-    struct {
-        uint64_t v:1;
-        uint64_t l:1;
-        uint64_t rsv1:8;
-        uint64_t ppn:52;
-        uint64_t rsv2:1;
-        uint64_t n:1;
-    } nonleaf64;
-} mpte_union_t;
-
 static inline bool mpte_is_leaf(uint64_t mpte)
 {
-   return mpte & 0x2;
+    return FIELD_EX8(mpte, MPTE, L);
 }
 
 static inline bool mpte_is_valid(uint64_t mpte)
 {
-    return mpte & 0x1;
+    return FIELD_EX8(mpte, MPTE, V);
+}
+
+static inline bool mpte_is_napot(uint64_t mpte)
+{
+    return mpte_is_leaf(mpte) ? FIELD_EX8(mpte, MPTE_LEAF, N) : false;
+}
+
+static inline uint8_t mpte_get_napot_g(CPURISCVState *env,
+                                       uint64_t mpte)
+{
+    return FIELD_EX64(mpte, MPTE_NAPOT_LEAF, G);
 }
 
 static uint64_t mpte_get_rsv(CPURISCVState *env, uint64_t mpte)
 {
     RISCVMXL mxl = riscv_cpu_mxl(env);
     bool leaf = mpte_is_leaf(mpte);
-    mpte_union_t *u = (mpte_union_t *)&mpte;
+    bool napot = mpte_is_napot(mpte);
+    uint64_t rsv = 0;
 
-    if (mxl == MXL_RV32) {
-        return leaf ? u->leaf32.rsv1 : u->nonleaf32.rsv1;
+    if (!leaf) {
+        rsv |= FIELD_EX64(mpte, MPTE_NON_LEAF, RSV);
+
+        if (mxl == MXL_RV64) {
+            rsv |= FIELD_EX64(mpte, MPTE_NON_LEAF_64, RSV);
+        }
+    } else {
+        rsv |= FIELD_EX64(mpte, MPTE_LEAF, RSV);
+
+        if (napot) {
+            rsv |= FIELD_EX64(mpte, MPTE_NAPOT_LEAF, RSV);
+            rsv |= (mxl == MXL_RV32) ? FIELD_EX64(mpte, MPTE_NAPOT_LEAF_32, RSV) :
+                                       FIELD_EX64(mpte, MPTE_NAPOT_LEAF_64, RSV);
+        } else if (mxl == MXL_RV64) {
+            rsv |= FIELD_EX64(mpte, MPTE_LEAF_64, RSV);
+        }
     }
-    return leaf ? (u->leaf64.rsv1 << 5) | u->leaf64.rsv2
-                : (u->nonleaf64.rsv1 << 1) | u->nonleaf64.rsv2;
+
+    return rsv;
 }
 
 static uint64_t mpte_get_perms(CPURISCVState *env, uint64_t mpte)
 {
     RISCVMXL mxl = riscv_cpu_mxl(env);
-    mpte_union_t *u = (mpte_union_t *)&mpte;
 
-    return (mxl == MXL_RV32) ? u->leaf32.perms : u->leaf64.perms;
+    if (mpte_is_napot(mpte)) {
+        return FIELD_EX64(mpte, MPTE_NAPOT_LEAF, PERMS);
+    }
+
+    return (mxl == MXL_RV32) ? FIELD_EX64(mpte, MPTE_LEAF_32, PERMS) :
+                               FIELD_EX64(mpte, MPTE_LEAF_64, PERMS);
 }
 
-static bool mpte_check_nlnapot(CPURISCVState *env, uint64_t mpte, bool *nlnapot)
+static bool mpte_napot_check_g(CPURISCVState *env, uint64_t mpte)
 {
     RISCVMXL mxl = riscv_cpu_mxl(env);
-    mpte_union_t *u = (mpte_union_t *)&mpte;
-    if (mxl == MXL_RV32) {
-        *nlnapot = false;
-        return true;
-    }
-    *nlnapot = u->nonleaf64.n;
-    return u->nonleaf64.n ? (u->nonleaf64.ppn & 0x1ff) == 0x100 : true;
+    uint8_t g = mpte_get_napot_g(env, mpte);
+
+    return (mxl == MXL_RV32) ? (g == 6) : (g == 4);
 }
 
-static uint64_t mpte_get_ppn(CPURISCVState *env, uint64_t mpte, int pn,
-                             bool nlnapot)
+static uint64_t mpte_get_ppn(CPURISCVState *env, uint64_t mpte, int pn)
 {
     RISCVMXL mxl = riscv_cpu_mxl(env);
-    mpte_union_t *u = (mpte_union_t *)&mpte;
 
-    if (nlnapot) {
-        return deposit64(u->nonleaf64.ppn, 0, 9, pn & 0x1ff);
-    }
-    return (mxl == MXL_RV32) ? u->nonleaf32.ppn : u->nonleaf64.ppn;
+    return (mxl == MXL_RV32) ? FIELD_EX64(mpte, MPTE_NON_LEAF_32, PPN) :
+                               FIELD_EX64(mpte, MPTE_NON_LEAF_64, PPN);
 }
 
 /* Caller should assert i before call this interface */
@@ -131,7 +157,10 @@ static int mpt_get_pn(hwaddr addr, int i, mpt_mode_t mode)
     }
 }
 
-/* Caller should assert i before call this interface */
+/*
+ * Caller should assert i before call this interface.
+ * This should be called for non-NAPOT leaf MPTE.
+ */
 static int mpt_get_pi(hwaddr addr, int i, mpt_mode_t mode)
 {
     if (mode == SMMPT34) {
@@ -145,7 +174,7 @@ static int mpt_get_pi(hwaddr addr, int i, mpt_mode_t mode)
 }
 
 static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
-                         mpt_access_t *allowed_access,
+                         int *allowed_access,
                          MMUAccessType access_type)
 {
     MemTxResult res;
@@ -156,6 +185,7 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
     uint32_t mptesize, levels, xwr;
     int pn, pi, pmp_prot, pmp_ret;
     uint64_t mpte, perms;
+    bool napot;
 
     switch (mode) {
     case SMMPT34:
@@ -168,15 +198,17 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
     case SMMPT64:
         load_entry = &load_entry_64; levels = 5; mptesize = 8; break;
     case SMMPTBARE:
-        *allowed_access = ACCESS_ALLOW_RWX;
+        *allowed_access = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
         return true;
     default:
         g_assert_not_reached();
         break;
     }
+
     for (int i = levels - 1; i >= 0 ; i--) {
         /* 1. Get pn[i] as the mpt index */
         pn = mpt_get_pn(addr, i, mode);
+
         /* 2. Get mpte address and get mpte */
         mpte_addr = base + pn * mptesize;
         pmp_ret = get_physical_address_pmp(env, &pmp_prot, mpte_addr,
@@ -185,6 +217,7 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
             return false;
         }
         mpte = load_entry(cs->as, mpte_addr, attrs, &res);
+
         /* 3. Check valid bit and reserve bits of mpte */
         if (!mpte_is_valid(mpte) || mpte_get_rsv(env, mpte)) {
             return false;
@@ -192,38 +225,38 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
 
         /* 4. Process non-leaf node */
         if (!mpte_is_leaf(mpte)) {
-            bool nlnapot = false;
             if (i == 0) {
                 return false;
             }
-            if (!mpte_check_nlnapot(env, mpte, &nlnapot)) {
-                return false;
-            }
-            base = mpte_get_ppn(env, mpte, pn, nlnapot) << PGSHIFT;
+
+            base = mpte_get_ppn(env, mpte, pn) << PGSHIFT;
             continue;
         }
 
         /* 5. Process leaf node */
-        pi = mpt_get_pi(addr, i, mode);
+        napot = mpte_is_napot(mpte);
+
+        if (napot && !mpte_napot_check_g(env, mpte)) {
+            return false;
+        }
+
+        pi = napot ? 0 : mpt_get_pi(addr, i, mode);
         perms = mpte_get_perms(env, mpte);
         xwr = (perms >> (pi * 3)) & 0x7;
+        *allowed_access = xwr;
+
         switch (xwr) {
-        case ACCESS_ALLOW_R:
-            *allowed_access = ACCESS_ALLOW_R;
+        case PAGE_READ:
             return access_type == MMU_DATA_LOAD;
-        case ACCESS_ALLOW_X:
-            *allowed_access = ACCESS_ALLOW_X;
+        case PAGE_EXEC:
             return access_type == MMU_INST_FETCH;
-        case ACCESS_ALLOW_RX:
-            *allowed_access = ACCESS_ALLOW_R;
+        case (PAGE_READ | PAGE_EXEC):
             return (access_type == MMU_DATA_LOAD ||
                     access_type == MMU_INST_FETCH);
-        case ACCESS_ALLOW_RW:
-            *allowed_access = ACCESS_ALLOW_RW;
+        case (PAGE_READ | PAGE_WRITE):
             return (access_type == MMU_DATA_LOAD ||
                     access_type == MMU_DATA_STORE);
-        case ACCESS_ALLOW_RWX:
-            *allowed_access = ACCESS_ALLOW_RWX;
+        case (PAGE_READ | PAGE_WRITE | PAGE_EXEC):
             return true;
         default:
             return false;
@@ -233,7 +266,7 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
 }
 
 bool smmpt_check_access(CPURISCVState *env, hwaddr addr,
-                        mpt_access_t *allowed_access, MMUAccessType access_type)
+                        int *allowed_access, MMUAccessType access_type)
 {
     bool mpt_has_access;
     mpt_mode_t mode = env->mptmode;
@@ -241,34 +274,4 @@ bool smmpt_check_access(CPURISCVState *env, hwaddr addr,
     mpt_has_access = smmpt_lookup(env, addr, mode,
                                   allowed_access, access_type);
     return mpt_has_access;
-}
-
-/*
- * Convert MPT access to TLB page privilege.
- */
-int smmpt_access_to_page_prot(mpt_access_t mpt_access)
-{
-    int prot;
-    switch (mpt_access) {
-    case ACCESS_ALLOW_R:
-        prot = PAGE_READ;
-        break;
-    case ACCESS_ALLOW_X:
-        prot = PAGE_EXEC;
-        break;
-    case ACCESS_ALLOW_RX:
-        prot = PAGE_READ | PAGE_EXEC;
-        break;
-    case ACCESS_ALLOW_RW:
-        prot = PAGE_READ | PAGE_WRITE;
-        break;
-    case ACCESS_ALLOW_RWX:
-        prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-        break;
-    default:
-        prot = 0;
-        break;
-    }
-
-    return prot;
 }
