@@ -1176,14 +1176,14 @@ static bool check_svukte_addr(CPURISCVState *env, vaddr addr)
 static int get_physical_address_mpt(CPURISCVState *env, int *prot, hwaddr addr,
                                     MMUAccessType access_type, int mode)
 {
-    mpt_access_t mpt_access;
+    int mpt_access;
     bool mpt_has_access;
 
     /*
      * If the extension is not supported or the mmpt.mode is Bare,
      * there is no protection, return success.
      */
-    if (!riscv_cpu_cfg(env)->ext_smmpt || env->mptmode == 0) {
+    if (!riscv_cpu_cfg(env)->ext_smmpt || env->mptmode == SMMPTBARE) {
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         return TRANSLATE_SUCCESS;
     }
@@ -1204,13 +1204,13 @@ static int get_physical_address_mpt(CPURISCVState *env, int *prot, hwaddr addr,
     }
 
     mpt_has_access = smmpt_check_access(env, addr,
-                                      &mpt_access, access_type);
+                                        &mpt_access, access_type);
     if (!mpt_has_access) {
         *prot = 0;
         return TRANSLATE_MPT_FAIL;
     }
 
-    *prot = smmpt_access_to_page_prot(mpt_access);
+    *prot = mpt_access;
 
     return TRANSLATE_SUCCESS;
 }
@@ -1413,7 +1413,7 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
         int mpt_ret = get_physical_address_mpt(env, &mpt_prot, pte_addr,
                                                MMU_DATA_LOAD, PRV_S);
         if (mpt_ret != TRANSLATE_SUCCESS) {
-            return TRANSLATE_MPT_FAIL;
+            return mpt_ret;
         }
 
         int pmp_prot;
@@ -1887,6 +1887,11 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                               " %d\n",
                               __func__, pa, ret, mpt_prot);
                 prot &= mpt_prot;
+
+                if (ret != TRANSLATE_SUCCESS) {
+                    goto translated;
+                }
+
                 ret = get_physical_address_pmp(env, &prot_pmp, pa,
                                                size, access_type, mode);
                 tlb_size = pmp_get_tlb_size(env, pa);
@@ -1928,6 +1933,11 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                           "%s MPT address=" HWADDR_FMT_plx " ret %d prot %d\n",
                           __func__, pa, ret, mpt_prot);
             prot &= mpt_prot;
+
+            if (ret != TRANSLATE_SUCCESS) {
+                goto translated;
+            }
+
             ret = get_physical_address_pmp(env, &prot_pmp, pa,
                                            size, access_type, mode);
             tlb_size = pmp_get_tlb_size(env, pa);
@@ -1941,6 +1951,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         }
     }
 
+translated:
     if (ret == TRANSLATE_PMP_FAIL) {
         pmp_violation = true;
     }
