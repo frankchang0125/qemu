@@ -10,6 +10,7 @@
 #include "hw/core/registerfields.h"
 #include "riscv_smmpt.h"
 #include "pmp.h"
+#include "trace.h"
 #include "system/memory.h"
 
 /* Non-leaf/Leaf MPTE common fields. */
@@ -186,6 +187,10 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
     int pn, pi, pmp_prot, pmp_ret;
     uint64_t mpte, perms;
     bool napot;
+    bool access_allowed;
+
+    trace_smmpt_lookup_start(env->mhartid, addr, mode, access_type,
+                             env->mptppn);
 
     switch (mode) {
     case SMMPT34:
@@ -199,6 +204,8 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
         load_entry = &load_entry_64; levels = 5; mptesize = 8; break;
     case SMMPTBARE:
         *allowed_access = (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
+        trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type,
+                               *allowed_access, true);
         return true;
     default:
         g_assert_not_reached();
@@ -214,22 +221,38 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
         pmp_ret = get_physical_address_pmp(env, &pmp_prot, mpte_addr,
                                            mptesize, MMU_DATA_LOAD, PRV_M);
         if (pmp_ret != TRANSLATE_SUCCESS) {
+            trace_smmpt_walk_fault(env->mhartid, addr, mode, i, mpte_addr,
+                                   "pmp");
+            trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type, 0,
+                                   false);
             return false;
         }
         mpte = load_entry(cs->as, mpte_addr, attrs, &res);
+        trace_smmpt_walk_mpte(env->mhartid, addr, mode, i, base, pn,
+                              mpte_addr, mpte);
 
         /* 3. Check valid bit and reserve bits of mpte */
         if (!mpte_is_valid(mpte) || mpte_get_rsv(env, mpte)) {
+            trace_smmpt_walk_fault(env->mhartid, addr, mode, i, mpte_addr,
+                                   !mpte_is_valid(mpte) ? "invalid" : "rsv");
+            trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type, 0,
+                                   false);
             return false;
         }
 
         /* 4. Process non-leaf node */
         if (!mpte_is_leaf(mpte)) {
             if (i == 0) {
+                trace_smmpt_walk_fault(env->mhartid, addr, mode, i, mpte_addr,
+                                       "nonleaf_level0");
+                trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type,
+                                       0, false);
                 return false;
             }
 
             base = mpte_get_ppn(env, mpte, pn) << PGSHIFT;
+            trace_smmpt_walk_next(env->mhartid, addr, mode, i, mpte_addr,
+                                  base);
             continue;
         }
 
@@ -237,6 +260,10 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
         napot = mpte_is_napot(mpte);
 
         if (napot && !mpte_napot_check_g(env, mpte)) {
+            trace_smmpt_walk_fault(env->mhartid, addr, mode, i, mpte_addr,
+                                   "napot_g");
+            trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type, 0,
+                                   false);
             return false;
         }
 
@@ -244,24 +271,40 @@ static bool smmpt_lookup(CPURISCVState *env, hwaddr addr, mpt_mode_t mode,
         perms = mpte_get_perms(env, mpte);
         xwr = (perms >> (pi * 3)) & 0x7;
         *allowed_access = xwr;
+        trace_smmpt_leaf(env->mhartid, addr, mode, i, mpte_addr, napot, pi,
+                         perms, xwr);
 
         switch (xwr) {
         case PAGE_READ:
-            return access_type == MMU_DATA_LOAD;
+            access_allowed = access_type == MMU_DATA_LOAD;
+            break;
         case PAGE_EXEC:
-            return access_type == MMU_INST_FETCH;
+            access_allowed = access_type == MMU_INST_FETCH;
+            break;
         case (PAGE_READ | PAGE_EXEC):
-            return (access_type == MMU_DATA_LOAD ||
-                    access_type == MMU_INST_FETCH);
+            access_allowed = (access_type == MMU_DATA_LOAD ||
+                              access_type == MMU_INST_FETCH);
+            break;
         case (PAGE_READ | PAGE_WRITE):
-            return (access_type == MMU_DATA_LOAD ||
-                    access_type == MMU_DATA_STORE);
+            access_allowed = (access_type == MMU_DATA_LOAD ||
+                              access_type == MMU_DATA_STORE);
+            break;
         case (PAGE_READ | PAGE_WRITE | PAGE_EXEC):
-            return true;
+            access_allowed = true;
+            break;
         default:
-            return false;
+            access_allowed = false;
+            break;
         }
+        if (!access_allowed) {
+            trace_smmpt_illegal_access(env->mhartid, addr, mode, access_type,
+                                       xwr);
+        }
+        trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type, xwr,
+                               access_allowed);
+        return access_allowed;
     }
+    trace_smmpt_lookup_end(env->mhartid, addr, mode, access_type, 0, false);
     return false;
 }
 

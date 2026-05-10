@@ -31,6 +31,7 @@
 #include "qapi/error.h"
 #include "tcg/insn-start-words.h"
 #include "internals.h"
+#include "trace.h"
 
 /* CSR function table public API */
 void riscv_get_csr_ops(int csrno, riscv_csr_operations *ops)
@@ -5479,6 +5480,8 @@ static RISCVException read_mmpt(CPURISCVState *env, int csrno,
     } else {
         return RISCV_EXCP_ILLEGAL_INST;
     }
+    trace_smmpt_mmpt_csr_read(env->mhartid, *val, env->mptmode, env->sdid,
+                              env->mptppn);
     return RISCV_EXCP_NONE;
 }
 
@@ -5487,6 +5490,8 @@ static RISCVException write_mmpt(CPURISCVState *env, int csrno,
 {
     uint32_t mode_value = 0;
     if (!riscv_cpu_cfg(env)->ext_smmpt) {
+        trace_smmpt_mmpt_csr_write(env->mhartid, val, SMMPTBARE, 0, 0,
+                                   "disabled");
         goto set_remaining_fields_zero;
     }
 
@@ -5494,6 +5499,8 @@ static RISCVException write_mmpt(CPURISCVState *env, int csrno,
         mode_value = (val & MMPT_MODE_MASK_32) >> MMPT_MODE_SHIFT_32;
         /* If mode is bare, the remaining fields in mmpt must be zero */
         if (mode_value == SMMPTBARE) {
+            trace_smmpt_mmpt_csr_write(env->mhartid, val, SMMPTBARE, 0, 0,
+                                       "bare");
             goto set_remaining_fields_zero;
         } else if (mode_value <= SMMPT34) {
             /* Only write the legal value */
@@ -5503,7 +5510,10 @@ static RISCVException write_mmpt(CPURISCVState *env, int csrno,
         env->mptppn = val & MMPT_PPN_MASK_32;
     } else if (riscv_cpu_xlen(env) == 64) {
         mode_value = (val & MMPT_MODE_MASK_64) >> MMPT_MODE_SHIFT_64;
+
         if (mode_value == SMMPTBARE) {
+            trace_smmpt_mmpt_csr_write(env->mhartid, val, SMMPTBARE, 0, 0,
+                                       "bare");
             goto set_remaining_fields_zero;
         }
 
@@ -5513,17 +5523,24 @@ static RISCVException write_mmpt(CPURISCVState *env, int csrno,
         if (mode_value < SMMPTMAX) {
             env->mptmode = mode_value;
         }
+
         env->sdid = (val & MMPT_SDID_MASK_64) >> MMPT_SDID_SHIFT_64;
         env->mptppn = val & MMPT_PPN_MASK_64;
     } else {
         return RISCV_EXCP_ILLEGAL_INST;
     }
+    trace_smmpt_mmpt_csr_write(env->mhartid, val, env->mptmode, env->sdid,
+                               env->mptppn, "update");
+    trace_smmpt_mmpt_csr_update(env->mhartid, env->mptmode, env->sdid,
+                                env->mptppn);
     return RISCV_EXCP_NONE;
 
 set_remaining_fields_zero:
     env->sdid = 0;
     env->mptmode = SMMPTBARE;
     env->mptppn = 0;
+    trace_smmpt_mmpt_csr_update(env->mhartid, env->mptmode, env->sdid,
+                                env->mptppn);
     return RISCV_EXCP_NONE;
 }
 

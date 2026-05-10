@@ -10,5 +10,19 @@ pmpaddr_csr_write(uint64_t mhartid, uint32_t addr_index, uint64_t val) "hart %" 
 mseccfg_csr_read(uint64_t mhartid, uint64_t val) "hart %" PRIu64 ": read mseccfg, val: 0x%" PRIx64
 mseccfg_csr_write(uint64_t mhartid, uint64_t val) "hart %" PRIu64 ": write mseccfg, val: 0x%" PRIx64
 
+# riscv_smmpt.c
+smmpt_lookup_start(uint64_t mhartid, uint64_t addr, uint32_t mode, uint32_t access_type, uint64_t mptppn) "hart %" PRIu64 ": Smmpt lookup addr:0x%" PRIx64 ", mode:%" PRIu32 ", access:%" PRIu32 ", mptppn:0x%" PRIx64
+smmpt_walk_mpte(uint64_t mhartid, uint64_t addr, uint32_t mode, int level, uint64_t base, uint32_t pn, uint64_t mpte_addr, uint64_t mpte) "hart %" PRIu64 ": Smmpt walk addr:0x%" PRIx64 ", mode:%" PRIu32 ", level:%d, base:0x%" PRIx64 ", pn:%" PRIu32 ", mpte_addr:0x%" PRIx64 ", mpte:0x%" PRIx64
+smmpt_walk_next(uint64_t mhartid, uint64_t addr, uint32_t mode, int level, uint64_t mpte_addr, uint64_t next_base) "hart %" PRIu64 ": Smmpt non-leaf addr:0x%" PRIx64 ", mode:%" PRIu32 ", level:%d, mpte_addr:0x%" PRIx64 ", next_base:0x%" PRIx64
+smmpt_leaf(uint64_t mhartid, uint64_t addr, uint32_t mode, int level, uint64_t mpte_addr, bool napot, uint32_t pi, uint64_t perms, uint32_t xwr) "hart %" PRIu64 ": Smmpt leaf addr:0x%" PRIx64 ", mode:%" PRIu32 ", level:%d, mpte_addr:0x%" PRIx64 ", napot:%d, pi:%" PRIu32 ", perms:0x%" PRIx64 ", xwr:0x%" PRIx32
+smmpt_walk_fault(uint64_t mhartid, uint64_t addr, uint32_t mode, int level, uint64_t mpte_addr, const char *reason) "hart %" PRIu64 ": Smmpt walk fault addr:0x%" PRIx64 ", mode:%" PRIu32 ", level:%d, mpte_addr:0x%" PRIx64 ", reason:%s"
+smmpt_illegal_access(uint64_t mhartid, uint64_t addr, uint32_t mode, uint32_t access_type, uint32_t xwr) "hart %" PRIu64 ": Smmpt illegal access addr:0x%" PRIx64 ", mode:%" PRIu32 ", access:%" PRIu32 ", xwr:0x%" PRIx32
+smmpt_lookup_end(uint64_t mhartid, uint64_t addr, uint32_t mode, uint32_t access_type, uint32_t allowed_access, bool pass) "hart %" PRIu64 ": Smmpt lookup end addr:0x%" PRIx64 ", mode:%" PRIu32 ", access:%" PRIu32 ", allowed:0x%" PRIx32 ", pass:%d"
+
+# csr.c
+smmpt_mmpt_csr_read(uint64_t mhartid, uint64_t val, uint32_t mode, uint64_t sdid, uint64_t mptppn) "hart %" PRIu64 ": read mmpt, val:0x%" PRIx64 ", mode:%" PRIu32 ", sdid:0x%" PRIx64 ", mptppn:0x%" PRIx64
+smmpt_mmpt_csr_write(uint64_t mhartid, uint64_t val, uint32_t mode, uint64_t sdid, uint64_t mptppn, const char *reason) "hart %" PRIu64 ": write mmpt, val:0x%" PRIx64 ", mode:%" PRIu32 ", sdid:0x%" PRIx64 ", mptppn:0x%" PRIx64 ", reason:%s"
+smmpt_mmpt_csr_update(uint64_t mhartid, uint32_t mode, uint64_t sdid, uint64_t mptppn) "hart %" PRIu64 ": update mmpt, mode:%" PRIu32 ", sdid:0x%" PRIx64 ", mptppn:0x%" PRIx64
+
 # op_helper.c
 riscv_exception(uint32_t exception, const char *desc, uint64_t epc) "%u (%s) on epc 0x%"PRIx64""
