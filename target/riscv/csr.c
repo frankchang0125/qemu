@@ -5505,9 +5505,12 @@ static RISCVException write_mmpt(CPURISCVState *env, int csrno,
         mode_value = (val & MMPT_MODE_MASK_64) >> MMPT_MODE_SHIFT_64;
         if (mode_value == SMMPTBARE) {
             goto set_remaining_fields_zero;
-        } else if (mode_value < SMMPTMAX) {
-            /* convert to mpt_mode_t */
-            mode_value += SMMPT43 - SMMPT34;
+        }
+
+        /* convert to mpt_mode_t */
+        mode_value += SMMPT43 - SMMPT34;
+
+        if (mode_value < SMMPTMAX) {
             env->mptmode = mode_value;
         }
         env->sdid = (val & MMPT_SDID_MASK_64) >> MMPT_SDID_SHIFT_64;
